@@ -3,7 +3,9 @@ import time
 import requests
 
 # 사용자 수
-USER_COUNT = 500_000
+#USER_COUNT = 500_000
+USER_COUNT_SRT = 5001
+USER_COUNT = 10000
 
 API_URL = 'http://localhost:8081/api/users'
 
@@ -22,7 +24,7 @@ def send_user(name, email, department, status):
 
 def main():
     start_time = time.time()
-    for i in range(1, USER_COUNT + 1):
+    for i in range(USER_COUNT_SRT, USER_COUNT + 1):
         name = f'사용자{i}'
         email = f'user{i}@example.com'
         department = '개발팀'

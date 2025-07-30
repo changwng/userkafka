@@ -145,7 +145,14 @@ SELECT * FROM department_stats;
 ```bash
 # Kafka 이벤트 재처리
 ./scripts/kafka-replay.sh -t user-events -o earliest
+# 해당 이벤트 소비 확인
+docker-compose logs post-service-kafka | grep -i 'state transition'
 ```
+
+참고: kafka-replay.sh 스크립트의 동작
+•	-o earliest: consumer offset을 처음부터
+•	기본 동작은 메시지를 “보기”만 함 (consume and print)
+•	메시지를 재전송하려면 consumer group offset 리셋 + post-service 재시작 필요
 
 docker exec -it kafka kafka-topics --help
 
@@ -202,6 +209,14 @@ cd user-service
 5. user-service start
 ### 데이터 일관성 문제
 ```bash
+
+./scripts/kafka-replay.sh -t user-events -r post-service-streams  실행후 표시 방법
+GROUP                          TOPIC                          PARTITION  NEW-OFFSET     
+post-service-streams           user-events                    0          0              
+
+Reset complete. Please RESTART the application for group 'post-service-streams' to start reprocessing.
+
+
 # Kafka Consumer Group 리셋
 kafka-consumer-groups --bootstrap-server localhost:9092 \
   --group post-service-streams --reset-offsets --to-earliest \
@@ -278,32 +293,191 @@ Netflix, LinkedIn 등 카프카 내부 구조 확장 활용
 
 java.io.IOException: No space left on device
 
-	at java.base/sun.nio.ch.FileDispatcherImpl.write0(Native Method)
 
-	at java.base/sun.nio.ch.FileDispatcherImpl.write(FileDispatcherImpl.java:62)
+docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --list
 
-	at java.base/sun.nio.ch.IOUtil.writeFromNativeBuffer(IOUtil.java:113)
+# 이 명령은 user-events 토픽의 모든 메시지를 처음부터 출력해줍니다.
+# → 사용자가 생성되었을 때의 Kafka 이벤트가 표시됩니다.
 
-	at java.base/sun.nio.ch.IOUtil.write(IOUtil.java:79)
+docker exec -it kafka \
+kafka-console-consumer --bootstrap-server localhost:9092 \
+--topic user-events --from-beginning
+```shell
+post-service 상태 확인
 
-	at java.base/sun.nio.ch.FileChannelImpl.write(FileChannelImpl.java:280)
+user-events는 있는데 post-service가 이를 소비하지 않고 오류 상태라면, 다음 원인들을 확인해보세요:
+	•	post-service의 Kafka Streams가 제대로 초기화되었는가?
+	•	Kafka Streams의 application.id가 중복되거나 변경되었는가?
+	•	docker-compose logs -f post-service-kafka 로그에서 Caused by 또는 Exception 확인
+```
+# 3. 🔁 post-service offset 리셋 (이벤트 재소비)
+```shell
+# Streams 애플리케이션 중단 후 실행
+docker-compose stop post-service-kafka
 
-	at kafka.log.ProducerStateManager$.kafka$log$ProducerStateManager$$writeSnapshot(ProducerStateManager.scala:451)
+# 오프셋 초기화
+docker exec -it kafka \
+  kafka-consumer-groups --bootstrap-server localhost:9092 \
+  --group post-service-streams \
+  --reset-offsets --to-earliest \
+  --topic user-events --execute
 
-	at kafka.log.ProducerStateManager.takeSnapshot(ProducerStateManager.scala:755)
+-- offset 초기화 결과 표시 
+GROUP                          TOPIC                          PARTITION  NEW-OFFSET     
+post-service-streams           user-events                    0          0   
 
-	at kafka.log.LogLoader.recoverSegment(LogLoader.scala:375)
+# post-service 재시작
+docker-compose start post-service-kafka
+```
 
-	at kafka.log.LogLoader.recoverLog(LogLoader.scala:427)
 
-	at kafka.log.LogLoader.load(LogLoader.scala:165)
+⸻
+4. 🧪 통합 흐름 테스트 (REST API → Kafka → Materialized View)
+    1.	사용자 등록 (POST /api/users)
+    2.	Post 등록 (POST /api/posts)
+    3.	Materialized View 조회 (GET /api/posts/users)
+   4. 
+5. ✅ Kafka Streams 상태 추적
+Kafka Streams 인스턴스 상태를 확인하려면 로그에서 다음 상태 변화를 찾으세요:
+ State transition from CREATED → RUNNING
+   State transition from PENDING_ERROR → ERROR
 
-	at kafka.log.UnifiedLog$.apply(UnifiedLog.scala:1853)
+-- 확인 처리 view 방법
+docker exec -it postgres_kafka psql -U postgres -d materialized_view_db
+SELECT * FROM user_view;
 
-	at kafka.log.LogManager.loadLog(LogManager.scala:287)
+### user API에서 사용자 생성시 kafka를 통해서 post-service로 사용자가 생성되는데 생성 지연시간이 존재하는데 설명해줘
+전체 흐름 요약
+1.	user-service에서 Kafka 토픽 user-events에 메시지를 produce.
+2.	Kafka 브로커가 메시지를 디스크에 기록.
+3.	post-service는 Kafka Streams를 통해 해당 토픽을 구독(consume)하고 처리.
+4.	post-service가 메시지를 읽고, 처리(DB에 저장 등)까지 완료.
+      지연이 발생하는 주요 원인
 
-	at kafka.log.LogManager.$anonfun$loadLogs$14(LogManager.scala:403)
+⏱️ 지연이 발생하는 주요 원인
+1. Kafka 자체의 비동기 처리 구조
+   •	프로듀서(user-service)는 메시지를 전송하고 바로 리턴되므로 처리 완료 여부를 기다리지 않음.
+   •	acks=1 또는 acks=all 설정에 따라 브로커로부터의 확인만 받고 리턴.
+   •	user-service에서는 메시지 보낸 시점에서 성공 처리하지만, 실제로 post-service까지 도달하고 처리되기까지는 시간이 소요됨.
 
-	at java.base/java.util.concurrent.Executors$RunnableAdapter.call(Executors.java:515)
+2. Kafka Streams 내부 처리 지연
 
-	at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:264)
+Kafka Streams (post-service)는 다음과 같은 이유로 지연될 수 있습니다:
+
+a. poll 주기 / 처리 주기
+•	Kafka Streams는 내부적으로 poll() → process() → commit() 루프를 반복합니다.
+•	이 사이클은 기본적으로 수십~수백 ms 단위로 반복됩니다.
+•	내부적으로 max.poll.interval.ms, commit.interval.ms 등의 설정값이 처리 주기를 결정합니다.
+
+b. Record cache flush latency
+•	Streams는 성능 최적화를 위해 state store 캐시를 사용합니다.
+•	예: materialized view를 저장하는 state store에 대한 업데이트는 버퍼에 잠시 머물다 flush 타이밍에만 반영됩니다.
+•	cache.max.bytes.buffering, commit.interval.ms 등이 flush 지연에 영향을 줍니다.
+
+c. Rebalance 중 상태 이동
+•	Kafka Streams는 topology 변경이나 컨슈머 group rebalance 중에는 일시적으로 REBALANCING → RUNNING 상태로 전이되며 처리 지연이 발생할 수 있습니다.
+3. Consumer group 처리 병목
+   •	Consumer가 여러 파티션을 하나의 스레드로 처리하고 있다면, 순차처리로 인해 처리량/속도에 제한이 생깁니다.
+   •	post-service가 하나의 인스턴스로 동작 중이라면 이 병목이 클 수 있습니다.
+
+⸻
+4. Spring Kafka 또는 Kafka Streams 설정
+   •	Spring Kafka/Streams 설정에서 다음과 같은 항목들이 지연을 유발할 수 있습니다:
+   설정 옵션
+   설명
+   commit.interval.ms
+   커밋 주기를 제어. 기본값: 30초
+   cache.max.bytes.buffering
+   state store 캐시 사이즈. 커지면 flush가 느려짐
+   poll.ms
+   Kafka poll 주기
+   num.stream.threads
+   처리 스레드 수. 적으면 병목 가능성
+   ✅ 해결/개선 방안
+5. 
+   •	KafkaStreams 상태 로그:
+   State transition from CREATED → REBALANCING → RUNNING
+   •	시작 지연 로그가 있다면 cold start 시 초기화가 느린 것.
+    2.	Spring Kafka Streams 설정 최적화 예시
+```shell
+spring:
+  kafka:
+    streams:
+      properties:
+        commit.interval.ms: 1000  # 1초마다 commit
+        cache.max.bytes.buffering: 0  # 캐시 비활성화 → 실시간성↑
+        processing.guarantee: exactly_once_v2
+      replication-factor: 1
+```
+	3.	Kafka consumer thread 수 조절
+	•	num.stream.threads=2 이상 설정 → 병렬 처리 가능
+	4.	애플리케이션 로그에 처리 시간 출력
+	•	post-service에서 메시지 수신 시 event.timestamp과 now()를 비교하여 지연 측정 가능
+실측 도구
+•	Kafka UI (provectuslabs/kafka-ui)에서 offset lag 확인
+•	jmx_exporter + Prometheus + Grafana로 Kafka Streams 지연 그래프 시각화
+
+결론
+
+Kafka 기반 아키텍처는 본질적으로 Eventually Consistent (최종 일관성) 모델을 따릅니다.
+따라서 "생성 즉시 반영"을 기대하기보다, 지연 원인을 최소화하고 모니터링하는 방식으로 대응하는 것이 일반적입니다.
+
+원하시면 Kafka Streams 쪽에서의 정확한 지연 시간 측정 코드나 Spring 설정 최적화도 도와드릴 수 있어요.
+
+--- 실측 데데이터 ---
+1000명 생성 완료 (경과 시간: 5.80초, 마지막 응답: 200)
+2000명 생성 완료 (경과 시간: 10.29초, 마지막 응답: 200)
+3000명 생성 완료 (경과 시간: 15.39초, 마지막 응답: 200)
+4000명 생성 완료 (경과 시간: 20.09초, 마지막 응답: 200)
+5000명 생성 완료 (경과 시간: 24.66초, 마지막 응답: 200)
+총 5000명 사용자 생성 완료. 전체 소요 시간: 24.66초
+ 실제 입력데이터는 초당 40개정도 처리 가능하다.
+
+아래 화면에서 Offset Lag이 0이면 실시간으로 잘 소비되고 있음
+![img.png](img.png)
+	•	값이 크면:
+	•	처리 속도가 느림
+	•	메시지가 너무 빠르게 쌓임
+	•	Consumer 오류 또는 재시작 중일 가능성
+![img_1.png](img_1.png)
+지연될경우 표시되는 화면
+![img_2.png](imgㅊ_2.png)
+SELECT
+date_trunc('second', last_processed_at) AS processed_second,
+COUNT(*) AS user_count
+FROM user_view
+GROUP BY processed_second
+ORDER BY processed_second;
+----
+2025-07-30 01:29:38	37
+2025-07-30 01:29:39	40
+2025-07-30 01:29:40	51
+2025-07-30 01:29:41	45
+2025-07-30 01:29:42	66
+2025-07-30 01:29:43	38
+2025-07-30 01:29:44	56
+2025-07-30 01:29:45	53
+2025-07-30 01:29:46	51
+2025-07-30 01:29:47	44
+2025-07-30 01:29:48	53
+2025-07-30 01:29:49	57
+2025-07-30 01:29:50	50
+2025-07-30 01:29:51	38
+2025-07-30 01:29:52	35
+2025-07-30 01:29:53	67
+2025-07-30 01:29:54	44
+2025-07-30 01:29:55	43
+2025-07-30 01:29:56	50
+2025-07-30 01:29:57	34
+2025-07-30 01:29:58	47
+2025-07-30 01:29:59	57
+2025-07-30 01:30:00	44
+2025-07-30 01:30:01	52
+2025-07-30 01:30:02	36
+2025-07-30 01:30:03	59
+2025-07-30 01:30:04	62
+2025-07-30 01:30:05	57
+2025-07-30 01:30:06	68
+2025-07-30 01:30:07	61
+2025-07-30 01:30:08	76
+2025-07-30 01:30:09	67
