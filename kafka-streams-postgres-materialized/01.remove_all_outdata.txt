@@ -1,0 +1,7 @@
+rm -rf postgres_data
+rm -rf kafka_data
+mkdir postgres_data
+mkdir kafka_data
+
+rm -rf ./postgres_data/*
+rm -rf ./kafka_data/*
