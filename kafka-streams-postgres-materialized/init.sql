@@ -1,5 +1,14 @@
 -- PostgreSQL initialization script
-CREATE DATABASE IF NOT EXISTS materialized_view_db;
+        DO
+    $do$
+BEGIN
+    IF NOT EXISTS (
+        SELECT FROM pg_database WHERE datname = 'materialized_view_db'
+    ) THEN
+        EXECUTE 'CREATE DATABASE materialized_view_db';
+END IF;
+END
+$do$;
 
 -- Create user_view table
 CREATE TABLE IF NOT EXISTS user_view (
@@ -37,12 +46,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_department_stats_dept ON department_stats(
 
 -- Function to refresh materialized view
 CREATE OR REPLACE FUNCTION refresh_department_stats()
-RETURNS TRIGGER AS $
+RETURNS TRIGGER AS $$
 BEGIN
-    REFRESH MATERIALIZED VIEW CONCURRENTLY department_stats;
+            REFRESH MATERIALIZED VIEW CONCURRENTLY department_stats;
     RETURN NULL;
 END;
-$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 -- Trigger to automatically refresh materialized view
 DROP TRIGGER IF EXISTS trigger_refresh_department_stats ON user_view;
